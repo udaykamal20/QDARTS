@@ -22,3 +22,12 @@ These can be found in the **test_modified.py** script:\
 **bn_bits:** bit-width for running mean and std in batchnorm layer (should be higher)\
 **fwd_bits:** bit-width for layer output (activation)\
 **n_sample:** number of samples to calculate the scaling factor
+
+### Post-quantization result (CIFAR10)
+
+| Weight-bit    | Activation-bit| Acc   |
+| ------------- |:-------------:| -----:|
+| 32      `     | 32            | 97.37 |
+| 8             | 8             | 97.44 |
+| 4             | 8             | 88.87 |
+| 4             | 4             | 18.02 |
