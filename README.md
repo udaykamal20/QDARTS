@@ -26,7 +26,7 @@ These can be found in the **test_modified.py** script:\
 ### Post-quantization result (CIFAR10)
 
 | Weight-bit    | Activation-bit| Acc   |
-| ------------- |:-------------:| -----:|
+| :-----------: |:-------------:| -----:|
 | 32      `     | 32            | 97.37 |
 | 8             | 8             | 97.44 |
 | 4             | 8             | 88.87 |
