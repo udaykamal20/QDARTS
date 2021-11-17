@@ -1,1 +1,1 @@
-This is the barebon darts implementation with lots of detailed comments on every procedure. The main implementation idea and some code were taken from original repo. This under the hood implementation helped me to figure out the integration (which will be added shortly)
+This is the bare-bone darts implementation with lots of detailed comments on every procedure. The main implementation idea and some code were taken from original repo. This under the hood implementation helped me to figure out the integration (which will be added shortly)
