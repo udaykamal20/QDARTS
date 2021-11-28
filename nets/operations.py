@@ -9,7 +9,6 @@ Created on Tue Nov 16 22:51:21 2021
 import torch
 import torch.nn as nn
 from genotypes import *
-from nets.quant_modules import MixActivConv2d
 import pdb
 
 def channel_shuffle(x, groups):
@@ -47,13 +46,8 @@ class MixedLayer_PC(nn.Module):
            'sep_conv_5x5': lambda C, stride, affine: SepConv(C, C, 5, stride, 2, affine=affine, conv_func=conv_func),
            'sep_conv_7x7': lambda C, stride, affine: SepConv(C, C, 7, stride, 3, affine=affine, conv_func=conv_func),
            'dil_conv_3x3': lambda C, stride, affine: DilConv(C, C, 3, stride, 2, 2, affine=affine, conv_func=conv_func),
-           'dil_conv_5x5': lambda C, stride, affine: DilConv(C, C, 5, stride, 4, 2, affine=affine,conv_func=conv_func),
-    
-           'conv_7x1_1x7': lambda C, stride, affine: nn.Sequential(
-             nn.ReLU(inplace=False),
-             nn.Conv2d(C, C, (1, 7), stride=(1, stride), padding=(0, 3), bias=False),
-             nn.Conv2d(C, C, (7, 1), stride=(stride, 1), padding=(3, 0), bias=False),
-             nn.BatchNorm2d(C, affine=affine))}
+           'dil_conv_5x5': lambda C, stride, affine: DilConv(C, C, 5, stride, 4, 2, affine=affine,conv_func=conv_func)
+           }
     
     for primitive in op_names:
       layer = OPS[primitive](C //self.k, stride, False)
@@ -62,12 +56,13 @@ class MixedLayer_PC(nn.Module):
       self.layers.append(layer)
 
 
-  def forward(self, x, weights):
+  def forward(self, x, weights, act, wt):
     #channel proportion k=4  
     dim_2 = x.shape[1]
     xtemp = x[ : , :  dim_2//self.k, :, :]
     xtemp2 = x[ : ,  dim_2//self.k:, :, :]
-    temp1 = sum(w * op(xtemp) for w, op in zip(weights, self.layers))
+    # import pdb; pdb.set_trace()
+    temp1 = sum(w * op(xtemp) if idx<3 else w * op(xtemp, act[idx-4], wt[idx-4]) for idx, (w, op) in enumerate(zip(weights, self.layers)))
     #reduction cell needs pooling before concat
     if temp1.shape[2] == x.shape[2]:
       ans = torch.cat([temp1,xtemp2],dim=1)
@@ -77,56 +72,6 @@ class MixedLayer_PC(nn.Module):
     #ans = torch.cat([ans[ : ,  dim_2//4:, :, :],ans[ : , :  dim_2//4, :, :]],dim=1)
     #except channe shuffle, channel shift also works
     return ans
-
-
-
-class MixedLayer(nn.Module):
-  def __init__(self, c, stride, op_names, conv_func):
-    super(MixedLayer, self).__init__()
-    self.op_names = op_names
-    self.layers = nn.ModuleList()
-    """
-    PRIMITIVES = [
-                'none',
-                'max_pool_3x3',
-                'avg_pool_3x3',
-                'skip_connect',
-                'sep_conv_3x3',
-                'sep_conv_5x5',
-                'dil_conv_3x3',
-                'dil_conv_5x5'
-            ]
-    """
-# OPS is a set of layers with same input/output channel.
-
-    OPS = {'none': lambda C, stride, affine: Zero(stride),
-           'avg_pool_3x3': lambda C, stride, affine: nn.AvgPool2d(3, stride=stride,
-                                                                  padding=1, count_include_pad=False),
-           'max_pool_3x3': lambda C, stride, affine: nn.MaxPool2d(3, stride=stride, padding=1),
-           'skip_connect': lambda C, stride, affine: Identity() if stride == 1 else FactorizedReduce(C, C, conv_func, affine=affine),
-           'sep_conv_3x3': lambda C, stride, affine: SepConv(C, C, 3, stride, 1, affine=affine, conv_func=conv_func),
-           'sep_conv_5x5': lambda C, stride, affine: SepConv(C, C, 5, stride, 2, affine=affine, conv_func=conv_func),
-           'sep_conv_7x7': lambda C, stride, affine: SepConv(C, C, 7, stride, 3, affine=affine, conv_func=conv_func),
-           'dil_conv_3x3': lambda C, stride, affine: DilConv(C, C, 3, stride, 2, 2, affine=affine, conv_func=conv_func),
-           'dil_conv_5x5': lambda C, stride, affine: DilConv(C, C, 5, stride, 4, 2, affine=affine,conv_func=conv_func),
-    
-           'conv_7x1_1x7': lambda C, stride, affine: nn.Sequential(
-             nn.ReLU(inplace=False),
-             nn.Conv2d(C, C, (1, 7), stride=(1, stride), padding=(0, 3), bias=False),
-             nn.Conv2d(C, C, (7, 1), stride=(stride, 1), padding=(3, 0), bias=False),
-             nn.BatchNorm2d(C, affine=affine))}
-    
-    for primitive in op_names:
-      layer = OPS[primitive](c, stride, False)
-      if 'pool' in primitive:
-        layer = nn.Sequential(layer, nn.BatchNorm2d(c, affine=False))
-
-      self.layers.append(layer)
-
-  def forward(self, x, weights):
-    return sum([w * layer(x) for w, layer in zip(weights, self.layers)])
-
-
 
 
 
@@ -146,13 +91,15 @@ class ReLUConvBN(nn.Module):
     """
     super(ReLUConvBN, self).__init__()
 
-    self.op = nn.Sequential(
-      nn.ReLU(inplace=False),
-      nn.Sequential(conv_func(inplane=C_in, outplane=C_out, kernel_size=kernel_size, stride=stride, padding=padding, bias=False)),
-      nn.BatchNorm2d(C_out, affine=affine))
+    self.relu = nn.ReLU(inplace=False)
+    self.conv = conv_func(C_in, C_out, kernel_size=kernel_size, stride=stride, padding=padding, bias=False)
+    self.bn = nn.BatchNorm2d(C_out, affine=affine)
 
-  def forward(self, x):
-    return self.op(x)
+  def forward(self, x, act, wt):
+    x = self.relu(x)
+    x = self.conv(x, act, wt)
+    x = self.bn(x)
+    return x
 
 
 class DilConv(nn.Module):
@@ -172,19 +119,22 @@ class DilConv(nn.Module):
     """
     super(DilConv, self).__init__()
 
-    self.op = nn.Sequential(
-      nn.ReLU(inplace=False),
-      nn.Sequential(conv_func(inplane=C_in, outplane=C_in, kernel_size=kernel_size, stride=stride, padding=padding, 
-                     dilation=dilation, groups=C_in, bias=False)),
-      nn.Sequential(MixActivConv2d(inplane=C_in, outplane=C_out, kernel_size=1, padding=0, bias=False)),
+    self.relu = nn.ReLU(inplace=False)
+    self.conv1 = conv_func(C_in, C_in, kernel_size=kernel_size, stride=stride, padding=padding, 
+                     dilation=dilation, groups=C_in, bias=False)
+    self.conv2 = conv_func(C_in, C_out, kernel_size=1, padding=0, bias=False)
      
       # nn.Conv2d(C_in, C_in, kernel_size=kernel_size, stride=stride, padding=padding,
       #           dilation=dilation, groups=C_in, bias=False),
       # nn.Conv2d(C_in, C_out, kernel_size=1, padding=0, bias=False),
-      nn.BatchNorm2d(C_out, affine=affine))
+    self.bn = nn.BatchNorm2d(C_out, affine=affine)
 
-  def forward(self, x):
-    return self.op(x)
+  def forward(self, x, act, wt):
+    x = self.relu(x)
+    x = self.conv1(x, act, wt)
+    x = self.conv2(x, act, wt)
+    x = self.bn(x)
+    return x
 
 
 class SepConv(nn.Module):
@@ -203,29 +153,37 @@ class SepConv(nn.Module):
     """
     super(SepConv, self).__init__()
 
-    self.op = nn.Sequential(
-      nn.ReLU(inplace=False),
-      nn.Sequential(conv_func(inplane=C_in, outplane=C_in, kernel_size=kernel_size, stride=stride, padding=padding, 
-                     groups=C_in, bias=False)),
-      nn.Sequential(conv_func(inplane=C_in, outplane=C_in, kernel_size=1, padding=0, bias=False)),
+    self.relu1 = nn.ReLU(inplace=False)
+    self.conv1 = conv_func(C_in, C_in, kernel_size=kernel_size, stride=stride, padding=padding,
+                     groups=C_in, bias=False)
+    self.conv2 = conv_func(C_in, C_in, kernel_size=1, padding=0, bias=False)
       # nn.Conv2d(C_in, C_in, kernel_size=kernel_size, stride=stride, padding=padding,
       #           groups=C_in, bias=False),
       # nn.Conv2d(C_in, C_in, kernel_size=1, padding=0, bias=False),
       
-      nn.BatchNorm2d(C_in, affine=affine),
-      nn.ReLU(inplace=False),
-      nn.Sequential(conv_func(inplane=C_in, outplane=C_in, kernel_size=kernel_size, stride=1, padding=padding, 
-                     groups=C_in, bias=False)),
-      nn.Sequential(conv_func(inplane=C_in, outplane=C_out, kernel_size=1, padding=0, bias=False)),
+    self.bn1 = nn.BatchNorm2d(C_in, affine=affine)
+    self.relu2 = nn.ReLU(inplace=False)
+    self.conv3 = conv_func(C_in, C_in, kernel_size=kernel_size, stride=1, padding=padding,
+                     groups=C_in, bias=False)
+    self.conv4 = conv_func(C_in, C_out, kernel_size=1, padding=0, bias=False)
       
       # nn.Conv2d(C_in, C_in, kernel_size=kernel_size, stride=1, padding=padding,
       #           groups=C_in, bias=False),
       # nn.Conv2d(C_in, C_out, kernel_size=1, padding=0, bias=False),
       
-      nn.BatchNorm2d(C_out, affine=affine))
+    self.bn2 = nn.BatchNorm2d(C_out, affine=affine)
 
-  def forward(self, x):
-    return self.op(x)
+  def forward(self, x, act, wt):
+    x = self.relu1(x)
+    x = self.conv1(x, act, wt)
+    x = self.conv2(x, act, wt)
+    x = self.bn1(x)
+    x = self.relu2(x)
+    x = self.conv3(x, act, wt)
+    x = self.conv4(x, act, wt)    
+    x = self.bn2(x)
+    
+    return x
 
 
 class Identity(nn.Module):
@@ -233,7 +191,7 @@ class Identity(nn.Module):
   def __init__(self):
     super(Identity, self).__init__()
 
-  def forward(self, x):
+  def forward(self, x, act, wt):
     return x
 
 
@@ -252,10 +210,7 @@ class Zero(nn.Module):
       return x.mul(0.)
     return x[:, :, ::self.stride, ::self.stride].mul(0.)
 
-def conv3x3(conv_func, in_plane, out_plane, kernel_size, stride=1, padding=0, bias=False, **kwargs):
-    "3x3 convolution with padding"
-    return conv_func(in_plane, out_plane, kernel_size=kernel_size, stride=stride,
-                     padding=padding, bias=bias, **kwargs)
+
 
 class FactorizedReduce(nn.Module):
   """
@@ -273,13 +228,13 @@ class FactorizedReduce(nn.Module):
     assert C_out % 2 == 0
 
     self.relu = nn.ReLU(inplace=False)
-    self.conv_1 = conv_func(inplane=C_in, outplane=C_out // 2, kernel_size=1, stride=2, padding=0, bias=False)
+    self.conv_1 = conv_func(C_in, C_out // 2, kernel_size=1, stride=2, padding=0, bias=False)
     self.conv_2 = conv_func(C_in, C_out // 2, kernel_size=1, stride=2, padding=0, bias=False)
     # self.conv_1 = nn.Conv2d(C_in, C_out // 2, 1, stride=2, padding=0, bias=False)
     # self.conv_2 = nn.Conv2d(C_in, C_out // 2, 1, stride=2, padding=0, bias=False)
     self.bn = nn.BatchNorm2d(C_out, affine=affine)
 
-  def forward(self, x):
+  def forward(self, x, act, wt):
     x = self.relu(x)
 
     # x: torch.Size([32, 32, 32, 32])
@@ -288,6 +243,6 @@ class FactorizedReduce(nn.Module):
     # out: torch.Size([32, 32, 16, 16])
     # pdb.set_trace()
     
-    out = torch.cat([self.conv_1(x), self.conv_2(x[:, :, 1:, 1:])], dim=1)
+    out = torch.cat([self.conv_1(x, act, wt), self.conv_2(x[:, :, 1:, 1:], act, wt)], dim=1)
     out = self.bn(out)
     return out
