@@ -16,7 +16,7 @@ import torch.optim as optim
 import torch.distributed as dist
 import torchvision.datasets as dset
 
-from nets.search_model import Network, Network_PC
+from nets.search_model import Network_PC
 
 from utils.preprocessing import cifar_search_transform
 from utils.second_order_update import *
@@ -40,15 +40,15 @@ parser.add_argument('--train_portion', type=float, default=0.5, help='portion of
 
 parser.add_argument('--order', type=str, default='1st', choices=['1st', '2nd'])
 
-parser.add_argument('--w_lr', type=float, default=0.025)
-parser.add_argument('--w_min_lr', type=float, default=0.0001)
+parser.add_argument('--w_lr', type=float, default=0.1)
+parser.add_argument('--w_min_lr', type=float, default=0.0)
 parser.add_argument('--w_wd', type=float, default=3e-4)
 
-parser.add_argument('--a_lr', type=float, default=3e-4)
+parser.add_argument('--a_lr', type=float, default=6e-4)
 parser.add_argument('--a_wd', type=float, default=1e-3)
-parser.add_argument('--a_start', type=int, default=-1)
+parser.add_argument('--a_start', type=int, default=15)
 
-parser.add_argument('--q_lr', type=float, default=3e-4)
+parser.add_argument('--q_lr', type=float, default=0.01)
 parser.add_argument('--q_wd', type=float, default=1e-3)
 parser.add_argument('--q_start', type=int, default=-1)
 
@@ -57,14 +57,14 @@ parser.add_argument('--num_cells', type=int, default=8)
 parser.add_argument('--num_nodes', type=int, default=4)
 parser.add_argument('--replica', type=int, default=1)
 
-parser.add_argument('--batch_size', type=int, default=50)
+parser.add_argument('--batch_size', type=int, default=128)
 parser.add_argument('--max_epochs', type=int, default=50)
 
 parser.add_argument('--log_interval', type=int, default=10)
 parser.add_argument('--gpus', type=str, default='0')
 parser.add_argument('--num_workers', type=int, default=4)
 
-parser.add_argument('--complexity-decay', '--cd', default=0.00335, type=float,
+parser.add_argument('--complexity-decay', '--cd', default=1e-4, type=float,
                     metavar='W', help='complexity decay (default: 1e-4)')
 
 parser.add_argument('--grad_clip', type=float, default=5, help='gradient clipping')
@@ -131,10 +131,9 @@ def main():
 
   if cfg.pc==True:
       model = Network_PC(C=cfg.init_ch, num_cells=cfg.num_cells,
-                      num_nodes=cfg.num_nodes, multiplier=cfg.num_nodes, num_classes=cifar, conv_func=MixActivConv2d)
-  else:      
-      model = Network(C=cfg.init_ch, num_cells=cfg.num_cells,
-                      num_nodes=cfg.num_nodes, multiplier=cfg.num_nodes, num_classes=cifar, conv_func=MixActivConv2d)
+                      num_nodes=cfg.num_nodes, multiplier=cfg.num_nodes, num_classes=cifar)
+  else:
+      raise ValueError('partial channel required to speed up training')      
 
   if not cfg.dist:
     # model = nn.DataParallel(model).to(device)
@@ -149,20 +148,23 @@ def main():
 
   # proxy_model is used for 2nd order update
   if cfg.order == '2nd':
-    proxy_model = Network(cfg.init_ch, cfg.num_cells, cfg.num_nodes).cuda()
+    proxy_model = Network_PC(cfg.init_ch, cfg.num_cells, cfg.num_nodes).cuda()
 
   # count_parameters(model)
 
   weights = [v for k, v in model.named_parameters() if 'alpha' not in k or 'beta' not in k or 'gamma' not in k]
   alphas = [v for v in model.arch_parameters()]
   betas = [v for k, v in model.named_parameters() if 'gamma' in k]
+  
 
   optimizer_w = optim.SGD(weights, cfg.w_lr, momentum=0.9, weight_decay=cfg.w_wd)
   optimizer_a = optim.Adam(alphas, lr=cfg.a_lr, betas=(0.5, 0.999), weight_decay=cfg.a_wd)
-  optimizer_q = optim.Adam(betas, lr=cfg.q_lr, betas=(0.5, 0.999), weight_decay=cfg.q_wd)
+  optimizer_q = optim.SGD(betas, lr=cfg.q_lr, betas=(0.5), weight_decay=cfg.q_wd)
   
   criterion = nn.CrossEntropyLoss().cuda()
   scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer_w, cfg.max_epochs, eta_min=cfg.w_min_lr)
+  scheduler_q = optim.lr_scheduler.CosineAnnealingLR(optimizer_q, cfg.max_epochs, eta_min=cfg.w_min_lr)
+
 
   alphas = []
   best_acc1 = -100
@@ -206,16 +208,15 @@ def main():
             loss_complexity = cfg.complexity_decay * model.module.complexity_loss()
         else:
             loss_complexity = cfg.complexity_decay * model.complexity_loss()
-      cls_loss += loss_complexity
+      final_loss = cls_loss +  loss_complexity
       
       optimizer_w.zero_grad()
       optimizer_q.zero_grad()
       
-      cls_loss.backward()
-      nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+      final_loss.backward()
+      nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
       optimizer_w.step()
       optimizer_q.step()
-      nn.utils.clip_grad_norm(model.parameters(), cfg.grad_clip)
 
       if batch_idx % cfg.log_interval == 0:
         step = len(train_loader) * epoch + batch_idx
@@ -261,7 +262,8 @@ def main():
     # val_sampler.set_epoch(epoch)
     train(epoch)
     acc = eval(epoch)
-    scheduler.step(epoch)  # move to here after pytorch1.1.0
+    scheduler.step(epoch)
+    scheduler_q.step(epoch)
     # print(model.module.genotype())
     is_best = acc > best_acc1
     best_acc1 = max(acc, best_acc1)
@@ -285,7 +287,7 @@ def main():
 
   summary_writer.close()
 
-def save_checkpoint(state, is_best, epoch, filename='darts_checkpoint.pth.tar'):
+def save_checkpoint(state, is_best, epoch, filename=f'darts_checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, 'darts_model_best.pth.tar')
