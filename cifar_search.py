@@ -159,7 +159,7 @@ def main():
 
   optimizer_w = optim.SGD(weights, cfg.w_lr, momentum=0.9, weight_decay=cfg.w_wd)
   optimizer_a = optim.Adam(alphas, lr=cfg.a_lr, betas=(0.5, 0.999), weight_decay=cfg.a_wd)
-  optimizer_q = optim.SGD(betas, lr=cfg.q_lr, betas=(0.5), weight_decay=cfg.q_wd)
+  optimizer_q = optim.SGD(betas, lr=cfg.q_lr, momentum=(0.9), weight_decay=cfg.q_wd)
   
   criterion = nn.CrossEntropyLoss().cuda()
   scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer_w, cfg.max_epochs, eta_min=cfg.w_min_lr)
@@ -283,7 +283,7 @@ def main():
     if cfg.local_rank == 0:
       torch.save(alphas, os.path.join(cfg.ckpt_dir, 'alphas.t7'))
       torch.save(model.state_dict(), os.path.join(cfg.ckpt_dir, 'search_checkpoint.t7'))
-      torch.save({'genotype': model.module.genotype()}, os.path.join(cfg.ckpt_dir, 'genotype.t7'))
+      torch.save({'genotype': model.genotype()}, os.path.join(cfg.ckpt_dir, 'genotype.t7'))
 
   summary_writer.close()
 
